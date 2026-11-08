@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Earth Command LIVE</title>
+<style>
+html,body{margin:0;height:100%;background:#000;overflow:hidden;font:11px ui-monospace,Menlo,Consolas,monospace;color:#9fe8ff}
+#g{position:absolute;inset:0}
+.pn{position:absolute;background:rgba(4,12,22,.74);border:1px solid #1b6b88;border-radius:6px;padding:8px;backdrop-filter:blur(4px);box-sizing:border-box}
+#top{top:6px;left:50%;transform:translateX(-50%);display:flex;gap:14px;align-items:center;padding:5px 12px;white-space:nowrap}
+#top b{color:#fff;letter-spacing:.15em}
+#L{left:6px;top:46px;width:200px;max-height:calc(100% - 56px);overflow:auto}
+#R{right:6px;top:46px;width:215px;max-height:calc(100% - 56px);overflow:auto}
+h4{margin:8px 0 4px;color:#5fb7d4;font-size:10px;letter-spacing:.12em}
+.ly{display:flex;align-items:center;gap:6px;padding:3px 0;cursor:pointer}
+.ly i{width:9px;height:9px;border-radius:50%;display:inline-block}
+.ly.off{opacity:.35}.ly span{flex:1}.ly em{font-style:normal;color:#fff}
+.st{font-size:9px;color:#6a8}.st.bad{color:#f77}
+input{width:100%;box-sizing:border-box;background:#06141f;color:#cff;border:1px solid #1b6b88;border-radius:4px;padding:5px;font:inherit;margin:3px 0}
+button.b{background:#0c2a3a;color:#cff;border:1px solid #1b6b88;border-radius:4px;padding:5px 8px;font:inherit}
+#log div{padding:2px 0;border-bottom:1px solid #12304a;color:#8cc}
+#ins div{padding:1px 0}#ins b{color:#fff}
+.tz{display:flex;justify-content:space-between}
+#tp{position:absolute;right:6px;bottom:6px;display:flex;gap:6px}
+</style></head><body>
+<div id="g"></div>
+<div class="pn" id="top"><b>EARTH COMMAND</b><span id="utc"></span><span id="cnt"></span></div>
+<div class="pn" id="L">
+<h4>LAYERS</h4><div id="ly"></div>
+<h4>SEARCH</h4><input id="q" placeholder="callsign / reg / ship / sat">
+<h4>AIS KEY (aisstream.io, free)</h4><input id="ak" placeholder="paste API key"><button class="b" id="ac">Connect ships</button>
+</div>
+<div class="pn" id="R">
+<h4>INSPECTOR</h4><div id="ins">Tap any point on the globe.</div>
+<h4>WORLD CLOCKS</h4><div id="tzs"></div>
+<h4>EVENT LOG</h4><div id="log"></div>
+</div>
+<div id="tp"><button class="b" id="rot">Auto-spin</button><button class="b" id="hide">Panels</button></div>
+<script src="https://cdn.jsdelivr.net/npm/globe.gl@2.33.1/dist/globe.gl.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/satellite.js@4.1.4/dist/satellite.min.js"></script>
+<script>
+const $=id=>document.getElementById(id), IMG='https://cdn.jsdelivr.net/npm/three-globe/example/img/';
+const LY={air:{n:'Civil aircraft',c:'#4cc9f0',on:1},mil:{n:'Military aircraft',c:'#ff4d4d',on:1},sea:{n:'Ships (AIS)',c:'#4aa3ff',on:1},sat:{n:'Satellites',c:'#ffd166',on:1},wx:{n:'Weather grid',c:'#7dffa0',on:1},eq:{n:'Earthquakes',c:'#ffa94d',on:1},tz:{n:'Time zones',c:'#ffd27a',on:0}};
+const S={air:new Map(),mil:new Map(),sea:new Map(),sat:[],wx:[],eq:[]};let sel=null,lastP=[];
+const G=Globe()($('g')).globeImageUrl(IMG+'earth-blue-marble.jpg').bumpImageUrl(IMG+'earth-topology.png').backgroundImageUrl(IMG+'night-sky.png')
+ .pointLat('lat').pointLng('lng').pointAltitude('alt').pointColor('color').pointRadius('r').pointResolution(4).pointLabel('label').onPointClick(pick)
+ .pathPoints('pts').pathPointLat(p=>p[0]).pathPointLng(p=>p[1]).pathPointAlt(p=>p[2]).pathColor('color').pathStroke(.5).pathTransitionDuration(0)
+ .ringLat('lat').ringLng('lng').ringMaxRadius(d=>d.mag*1.4).ringPropagationSpeed(2).ringRepeatPeriod(1800).ringColor(()=>t=>`rgba(255,160,60,${1-t})`)
+ .labelLat('lat').labelLng('lng').labelText('t').labelSize(.7).labelColor(()=>'#ffd27a').labelAltitude(.002).labelResolution(2);
+G.controls().autoRotate=true;G.controls().autoRotateSpeed=.3;
+function fit(){G.width(innerWidth).height(innerHeight)}addEventListener('resize',fit);fit();
+$('rot').onclick=()=>G.controls().autoRotate^=1;$('hide').onclick=()=>{for(const i of['L','R'])$(i).style.display=$(i).style.display=='none'?'':'none'};
+const ST={};function st(k,ok,m){ST[k]=[ok,m];$('st_'+k)&&($('st_'+k).textContent=m,$('st_'+k).className='st'+(ok?'':' bad'))}
+$('ly').innerHTML=Object.keys(LY).map(k=>`<div class="ly" id="ly_${k}"><i style="background:${LY[k].c}"></i><span>${LY[k].n}<br><small class="st" id="st_${k}">…</small></span><em id="n_${k}">0</em></div>`).join('');
+for(const k in LY)$('ly_'+k).onclick=()=>{LY[k].on^=1;$('ly_'+k).classList.toggle('off',!LY[k].on);rebuild()};
+function log(m){const d=document.createElement('div');d.textContent=new Date().toISOString().slice(11,19)+' '+m;$('log').prepend(d);while($('log').children.length>30)$('log').lastChild.remove()}
+const sun=()=>{const d=new Date(),ut=d.getUTCHours()+d.getUTCMinutes()/60,doy=(d-Date.UTC(d.getUTCFullYear(),0,0))/864e5;return[23.44*Math.sin(2*Math.PI*(doy-81)/365),-(ut-12)*15]};
+// ---- aircraft (adsb.lol, free, no key) ----
+function ingest(list,map,kind){const now=Date.now();for(const a of list){if(a.lat==null||a.lon==null)continue;const p=map.get(a.hex),ft=typeof a.alt_baro==='number'?a.alt_baro:0;
+ const o={id:a.hex,kind,lat:a.lat,lng:a.lon,ft,gs:a.gs,trk:a.track,name:(a.flight||'').trim()||a.r||a.hex,reg:a.r,type:a.t,ts:now,trail:p?p.trail:[]};
+ if(!o.trail.length||o.trail.at(-1)[0]!==a.lat)o.trail.push([a.lat,a.lon,.004+Math.min(ft,45000)/45000*.02]);if(o.trail.length>60)o.trail.shift();map.set(a.hex,o)}
+ for(const[k,v]of map)if(now-v.ts>150000)map.delete(k);if(map.size>5000)for(const k of[...map.keys()].slice(0,map.size-5000))map.delete(k)}
+async function getAir(){try{const p=G.pointOfView(),r=await fetch(`https://api.adsb.lol/v2/point/${p.lat.toFixed(2)}/${p.lng.toFixed(2)}/250`);ingest((await r.json()).ac||[],S.air,'air');st('air',1,'live · '+S.air.size)}catch(e){st('air',0,'feed error')}}
+async function getMil(){try{const r=await fetch('https://api.adsb.lol/v2/mil');ingest((await r.json()).ac||[],S.mil,'mil');st('mil',1,'live · '+S.mil.size)}catch(e){st('mil',0,'feed error')}}
+// ---- satellites (CelesTrak TLE + satellite.js) ----
+async function getSat(){try{const gs=['stations','visual','gps-ops','geo'],out=[];
+ for(const g of gs){const t=await (await fetch(`https://celestrak.org/NORAD/elements/gp.php?GROUP=${g}&FORMAT=tle`)).text(),L=t.split(/\r?\n/).filter(Boolean);
+  for(let i=0;i+2<L.length;i+=3)try{out.push({kind:'sat',name:L[i].trim(),rec:satellite.twoline2satrec(L[i+1],L[i+2]),grp:g})}catch(e){}}
+ S.sat=out;st('sat',1,'TLE · '+out.length)}catch(e){st('sat',0,'feed error')}}
+// ---- weather (Open-Meteo, real model data on a 15° grid) ----
+async function getWx(){try{const la=[],lo=[];for(let a=-75;a<=75;a+=15)for(let b=-180;b<180;b+=15){la.push(a);lo.push(b)}
+ const r=await (await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${la}&longitude=${lo}&current=temperature_2m,wind_speed_10m,wind_direction_10m`)).json();
+ S.wx=(Array.isArray(r)?r:[r]).map(x=>({kind:'wx',lat:x.latitude,lng:x.longitude,w:x.current.wind_speed_10m,dir:x.current.wind_direction_10m,t:x.current.temperature_2m}));st('wx',1,'model · '+S.wx.length)}catch(e){st('wx',0,'feed error')}}
+// ---- earthquakes (USGS) ----
+let seen=new Set();async function getEq(){try{const j=await (await fetch('https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/2.5_day.geojson')).json();
+ S.eq=j.features.map(f=>({lat:f.geometry.coordinates[1],lng:f.geometry.coordinates[0],mag:f.properties.mag,place:f.properties.place}));
+ for(const f of j.features.slice(0,8))if(!seen.has(f.id)){seen.add(f.id);log(`M${f.properties.mag} ${f.properties.place}`)}st('eq',1,'USGS · '+S.eq.length);G.ringsData(LY.eq.on?S.eq:[])}catch(e){st('eq',0,'feed error')}}
+// ---- ships (AISStream websocket, needs free key) ----
+let ws;function conn(){const k=$('ak').value.trim();if(!k)return;try{localStorage.setItem('ak',k)}catch(e){}
+ if(ws)ws.close();ws=new WebSocket('wss://stream.aisstream.io/v0/stream');
+ ws.onopen=()=>{ws.send(JSON.stringify({APIKey:k,BoundingBoxes:[[[-90,-180],[90,180]]],FilterMessageTypes:['PositionReport']}));st('sea',1,'connected')};
+ ws.onmessage=e=>{try{const m=JSON.parse(e.data),p=m.Message.PositionReport,id=m.MetaData.MMSI,o=S.sea.get(id),n=Date.now();
+  const v={id,kind:'sea',lat:p.Latitude,lng:p.Longitude,name:(m.MetaData.ShipName||'').trim()||String(id),sog:p.Sog,cog:p.Cog,ts:n,trail:o?o.trail:[]};
+  v.trail.push([v.lat,v.lng,.002]);if(v.trail.length>40)v.trail.shift();S.sea.set(id,v);if(S.sea.size>4000)S.sea.delete(S.sea.keys().next().value)}catch(x){}};
+ ws.onerror=()=>st('sea',0,'AIS error');ws.onclose=()=>st('sea',0,'AIS closed')}
+$('ac').onclick=conn;try{$('ak').value=localStorage.getItem('ak')||''}catch(e){}
+// ---- build scene ----
+const ramp=w=>`hsl(${Math.max(0,120-w*2.4)},90%,55%)`;
+function rebuild(){const P=[],gm=satellite.gstime(new Date()),now=new Date();
+ if(LY.air.on)for(const o of S.air.values())P.push({...o,alt:o.trail.at(-1)[2],color:LY.air.c,r:.1,label:`${o.name}<br>${Math.round(o.ft)} ft · ${o.gs||'?'} kt`});
+ if(LY.mil.on)for(const o of S.mil.values())P.push({...o,alt:o.trail.at(-1)[2],color:LY.mil.c,r:.18,label:`MIL ${o.name}<br>${o.type||''} ${Math.round(o.ft)} ft`});
+ if(LY.sea.on)for(const o of S.sea.values())P.push({...o,alt:.002,color:LY.sea.c,r:.1,label:`${o.name}<br>${o.sog} kn`});
+ let ns=0;if(LY.sat.on)for(const s of S.sat){const pv=satellite.propagate(s.rec,now);if(!pv.position)continue;const g=satellite.eciToGeodetic(pv.position,gm);
+  s.lat=satellite.degreesLat(g.latitude);s.lng=satellite.degreesLong(g.longitude);s.h=g.height;s.v=Math.hypot(pv.velocity.x,pv.velocity.y,pv.velocity.z);
+  P.push({...s,alt:Math.log10(1+g.height/1000)*.12,color:LY.sat.c,r:.22,label:s.name+'<br>'+Math.round(g.height)+' km'});ns++}
+ if(LY.wx.on)for(const w of S.wx)P.push({...w,alt:.001,color:ramp(w.w),r:.45,label:`${w.w} km/h wind from ${w.dir}° · ${w.t}°C`});
+ const[sl,sg]=sun();P.push({kind:'sun',lat:sl,lng:sg,alt:.03,color:'#ffe066',r:.9,label:'Subsolar point (sun overhead)'});
+ lastP=P;G.pointsData(P);
+ const paths=[];if(LY.tz.on)for(let k=-12;k<=12;k++){const a=[];for(let l=-85;l<=85;l+=5)a.push([l,k*15,.001]);paths.push({pts:a,color:'rgba(255,210,120,.45)'})}
+ if(sel){const tr=trailOf(sel);if(tr)paths.push({pts:tr,color:'#ffffff'})}
+ G.pathsData(paths);G.labelsData(LY.tz.on?Array.from({length:25},(_,i)=>({lat:0,lng:(i-12)*15,t:'UTC'+(i-12>=0?'+':'')+(i-12)})):[]);G.ringsData(LY.eq.on?S.eq:[]);
+ $('n_air').textContent=S.air.size;$('n_mil').textContent=S.mil.size;$('n_sea').textContent=S.sea.size;$('n_sat').textContent=ns;$('n_wx').textContent=S.wx.length;$('n_eq').textContent=S.eq.length;
+ $('cnt').textContent=`AIR ${S.air.size} · MIL ${S.mil.size} · SEA ${S.sea.size} · SAT ${ns}`;if(sel)inspect()}
+function trailOf(o){if(o.kind==='sat'){const per=2*Math.PI/o.rec.no,a=[],t0=Date.now();for(let m=0;m<=Math.min(per,1500);m+=2){const d=new Date(t0+m*6e4),pv=satellite.propagate(o.rec,d);if(!pv.position)continue;const g=satellite.eciToGeodetic(pv.position,satellite.gstime(d));a.push([satellite.degreesLat(g.latitude),satellite.degreesLong(g.longitude),Math.log10(1+g.height/1000)*.12])}return a}
+ const cur=(o.kind==='air'?S.air:o.kind==='mil'?S.mil:S.sea).get(o.id);return cur&&cur.trail.length>1?cur.trail:null}
+function pick(d){if(!d||d.kind==='sun'||d.kind==='wx'){return}sel=d;inspect();G.pointOfView({lat:d.lat,lng:d.lng,altitude:1.1},900);G.controls().autoRotate=false;rebuild()}
+function inspect(){const o=sel;let h=`<div><b>${o.name||'Weather'}</b> [${o.kind.toUpperCase()}]</div><div>lat ${o.lat?.toFixed(3)} lon ${o.lng?.toFixed(3)}</div>`;
+ if(o.kind==='air'||o.kind==='mil')h+=`<div>alt ${Math.round(o.ft)} ft · spd ${o.gs||'?'} kt · hdg ${o.trk??'?'}°</div><div>reg ${o.reg||'?'} · type ${o.type||'?'} · hex ${o.id}</div>`;
+ if(o.kind==='sea')h+=`<div>speed ${o.sog} kn · course ${o.cog}° · MMSI ${o.id}</div>`;
+ if(o.kind==='sat')h+=`<div>alt ${Math.round(o.h||0)} km · speed ${(o.v||0).toFixed(2)} km/s</div><div>period ${(2*Math.PI/o.rec.no).toFixed(1)} min · group ${o.grp}</div>`;
+ $('ins').innerHTML=h}
+$('q').onkeydown=e=>{if(e.key!=='Enter')return;const t=e.target.value.toLowerCase(),m=lastP.find(p=>p.kind!=='sun'&&p.kind!=='wx'&&((p.name||'')+(p.reg||'')+(p.id||'')).toLowerCase().includes(t));m?pick(m):log('no match: '+t)};
+// ---- clocks ----
+const zs=[['UTC','UTC'],['New York','America/New_York'],['London','Europe/London'],['Dubai','Asia/Dubai'],['Delhi','Asia/Kolkata'],['Tokyo','Asia/Tokyo'],['Sydney','Australia/Sydney']];
+$('tzs').innerHTML=zs.map((z,i)=>`<div class="tz"><span>${z[0]}</span><b id="z${i}"></b></div>`).join('');
+function tick(){const d=new Date();$('utc').textContent=d.toISOString().slice(0,19).replace('T',' ')+'Z';zs.forEach((z,i)=>$('z'+i).textContent=d.toLocaleTimeString('en-GB',{timeZone:z[1]}))}
+tick();setInterval(tick,1000);
+// ---- start ----
+getAir();getMil();getSat();getWx();getEq();if($('ak').value)conn();
+setInterval(getAir,10000);setInterval(getMil,15000);setInterval(getWx,900000);setInterval(getEq,120000);setInterval(getSat,6*3600e3);setInterval(rebuild,1000);
+log('Command center online');
+</script></body></html>
